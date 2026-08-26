@@ -1451,8 +1451,11 @@ local Esp = {
 	hpBar = false,
 	textSize = 12,
 	chams = {},
-	pool = { text = {}, line = {}, tri = {} },
-	used = { text = 0, line = 0, tri = 0 },
+	-- `label` is the no-Drawing half of the text pool; hideRest walks both
+	-- from the same used.text count, so only one of them is ever populated
+	pool = { text = {}, line = {}, tri = {}, label = {} },
+	used = { text = 0, line = 0, tri = 0, label = 0 },
+	gui = nil,
 	drawn = 0, running = false,
 }
 
@@ -1481,20 +1484,70 @@ local CHAM_STYLES = { "Highlight", "Box" }
 
 -- ------------------------------- the pool -------------------------------
 
+-- The label board, made once and only when it is needed.
+function Esp.board()
+	if Esp.gui and Esp.gui.Parent then return Esp.gui end
+	local parent = (typeof(gethui) == "function" and gethui())
+		or LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if not parent then return nil end
+	Esp.gui = make("ScreenGui", {
+		Name = "RKEspText", ResetOnSpawn = false, IgnoreGuiInset = true,
+		DisplayOrder = 9998, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, parent)
+	return Esp.gui
+end
+addCleanup("esptext", function()
+	if Esp.gui then pcall(function() Esp.gui:Destroy() end) Esp.gui = nil end
+	Esp.pool.label = {}
+end)
+
 function Esp.text(str, pos, color)
 	local n = Esp.used.text + 1
 	Esp.used.text = n
-	local d = Esp.pool.text[n]
-	if not d then
-		d = newDraw("Text", { Center = true, Outline = false, Font = 2 })
-		if not d then return end
-		Esp.pool.text[n] = d
+
+	if HAS_DRAWING and not Esp.drawTextDead then
+		local d = Esp.pool.text[n]
+		if not d then
+			d = newDraw("Text", { Center = true, Outline = false, Font = 2 })
+			if d then
+				Esp.pool.text[n] = d
+			elseif n == 1 then
+				-- the global exists but will not make a Text. Say so once and
+				-- use labels from here on, rather than returning empty every
+				-- frame on precisely the clients the fallback is for.
+				Esp.drawTextDead = true
+				notify("Drawing text is not available - using labels instead", 5)
+			end
+		end
+		if d then
+			d.Size = Esp.textSize
+			d.Text = str
+			d.Color = color
+			d.Position = pos
+			d.Visible = true
+			return
+		end
 	end
-	d.Size = Esp.textSize
-	d.Text = str
-	d.Color = color
-	d.Position = pos
-	d.Visible = true
+
+	-- no Drawing: a TextLabel does the same job and every client has one
+	local gui = Esp.board()
+	if not gui then return end
+	local l = Esp.pool.label[n]
+	if not l then
+		l = make("TextLabel", {
+			Name = "RKText", BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold, TextStrokeTransparency = 0.4,
+			TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Size = UDim2.fromOffset(240, 20),
+		}, gui)
+		Esp.pool.label[n] = l
+	end
+	l.TextSize = Esp.textSize + 1
+	l.Text = str
+	l.TextColor3 = color
+	l.Position = UDim2.fromOffset(pos.X, pos.Y)
+	l.Visible = true
 end
 
 function Esp.line(from, to, color)
@@ -1524,6 +1577,8 @@ function Esp.triangle(a, b, c, color)
 end
 
 function Esp.hideRest()
+	-- the label pool is filled from used.text, not from a count of its own
+	Esp.used.label = Esp.used.text
 	for kind, list in pairs(Esp.pool) do
 		for i = Esp.used[kind] + 1, #list do
 			local d = list[i]
@@ -1657,6 +1712,30 @@ function Esp.step()
 
 	-- FOV circle is drawn from the pool as a real Circle, kept separate
 	-- because there is only ever one of it
+	-- the silent aim gate, drawn at the radius it actually uses
+	if Fight.silentRing then
+		if not Esp.silentCircle then
+			Esp.silentCircle = newDraw("Circle", {
+				Thickness = 1, NumSides = 48, Filled = false,
+				Color = Color3.fromRGB(120, 200, 255), Transparency = 0.75,
+			})
+		end
+		if Esp.silentCircle then
+			Esp.silentCircle.Position = centre
+			Esp.silentCircle.Radius = Fight.silentFov or 360
+			-- brightens the moment something is inside it, which is the only
+			-- question a player has about a gate like this
+			local live = Fight.silent and Fight.silentOff
+				and Fight.silentOff <= (Fight.silentFov or 360)
+			Esp.silentCircle.Color = live and Color3.fromRGB(140, 255, 170)
+				or Color3.fromRGB(120, 200, 255)
+			Esp.silentCircle.Transparency = live and 1 or 0.6
+			Esp.silentCircle.Visible = true
+		end
+	elseif Esp.silentCircle then
+		Esp.silentCircle.Visible = false
+	end
+
 	if Esp.fovCircle then
 		if not Esp.circle then
 			Esp.circle = newDraw("Circle", {
@@ -1909,7 +1988,8 @@ function Esp.step()
 end
 
 function Esp.refreshRunning()
-	local want = Esp.rake or Esp.players or Esp.flare or Esp.supply or Esp.location
+	local want = Fight.silentRing
+		or Esp.rake or Esp.players or Esp.flare or Esp.supply or Esp.location
 		or Esp.scrap or Esp.traps or Esp.rusty or Esp.rakeTracer or Esp.playerTracer
 		or Esp.fovCircle or Esp.arrowRake or Esp.arrowPlayers
 	if want and not Esp.conn then
@@ -1931,6 +2011,7 @@ function Esp.refreshRunning()
 		Esp.used.text, Esp.used.line, Esp.used.tri = 0, 0, 0
 		Esp.hideRest()
 		if Esp.circle then Esp.circle.Visible = false end
+		if Esp.silentCircle then Esp.silentCircle.Visible = false end
 		Esp.clearChams()
 	end
 end
@@ -2052,16 +2133,37 @@ function Fight.silentTarget()
 	if not (r and me) then return nil end
 	local hum = r:FindFirstChildOfClass("Humanoid")
 	if hum and hum.Health <= 0 then return nil end
-	-- whichever part of it is closest to you, not always the root: a limb
-	-- that is nearer is a better thing to report having hit
-	local best, bestDist
+
+	local c = cam()
+	local centre = c and (c.ViewportSize / 2) or nil
+	-- 360 is the whole screen: past that the circle is bigger than the
+	-- viewport and the gate has stopped meaning anything
+	local fov = Fight.silentFov or 360
+
+	-- Whichever part is closest to your CROSSHAIR, not closest in the world.
+	-- Nearest-in-the-world would happily pick a limb behind you.
+	local best, bestOff, bestDist
 	for _, d in ipairs(r:GetChildren()) do
 		if d:IsA("BasePart") then
 			local dist = (d.Position - me).Magnitude
-			if not bestDist or dist < bestDist then best, bestDist = d, dist end
+			if dist <= Fight.range then
+				local off = 0
+				if centre then
+					local sp, on = project(d.Position)
+					if not (sp and on) then
+						off = nil          -- behind you is not in your field of view
+					else
+						off = (sp - centre).Magnitude
+					end
+				end
+				if off and off <= fov and (not bestOff or off < bestOff) then
+					best, bestOff, bestDist = d, off, dist
+				end
+			end
 		end
 	end
-	if not best or bestDist > Fight.range then return nil end
+	Fight.silentOff = bestOff
+	if not best then return nil end
 	return best
 end
 
@@ -2105,6 +2207,10 @@ end
 -- The stun stick's cooldown and its malfunction chance are numbers the
 -- client holds, the same way stamina was. This finds them by name and zeroes
 -- them, and reports what it actually hit rather than claiming success.
+Fight.silentFov = 200
+Fight.silentRing = false
+Fight.silentOff = nil
+
 Fight.coolKeys = { "COOLDOWN", "ATTACK_COOLDOWN", "SWING_COOLDOWN", "HIT_COOLDOWN",
 	"AttackCooldown", "attackCooldown", "cooldown", "DEBOUNCE", "Debounce" }
 Fight.breakKeys = { "MALFUNCTION", "MALFUNCTION_CHANCE", "BREAK_CHANCE",
@@ -2276,6 +2382,21 @@ function Fight.setNoCooldown(on)
 	addCleanup("nocooldown", function() Fight.setNoCooldown(false) end)
 end
 
+-- Turning Anti Malfunction on while No Hit Cooldown is already on has to
+-- re-read the pace, or the 0.05 set earlier stands.
+function Fight.repace()
+	if Fight.noBreak then
+		-- Anti Malfunction outranks No Hit Cooldown. The cooldown toggle
+		-- removes the game's own wait between swings; it does not get to
+		-- remove the one that stops the stick jamming.
+		Fight.gap = Fight.safeGap
+	elseif Fight.noCooldown then
+		Fight.gap = 0.05
+	else
+		Fight.gap = 0.1
+	end
+end
+
 function Fight.setPatch(field, value)
 	Fight[field] = value
 	if Fight.noCooldown or Fight.noBreak then
@@ -2294,12 +2415,12 @@ function Fight.setPatch(field, value)
 			end)
 		end
 		Fight.patchWeapon()
-		Fight.gap = 0.05
 	else
 		if Fight.patchConn then Fight.patchConn:Disconnect() Fight.patchConn = nil end
 		Fight.patchStatus = "off"
-		Fight.gap = 0.1
 	end
+	-- one place decides the pace, and it is the last word here
+	Fight.repace()
 end
 
 function Fight.stick()
@@ -2311,9 +2432,44 @@ end
 -- The two calls are a swing and then a hit, and they are a frame apart on
 -- purpose: sent together, the hit arrives before there is a swing to attach
 -- it to and the server discards it.
+Fight.safeGap = 0.55   -- seconds between swings while Anti Malfunction is on
+Fight.burst = 5        -- swings allowed back to back
+Fight.refill = 1.4     -- seconds to earn one back
+
+-- A bucket, not just a gap. The gap bounds how fast two swings can be; the
+-- bucket bounds how many there can be in a minute, and "too many times too
+-- fast" is a complaint about both.
+function Fight.token()
+	local now = os.clock()
+	local have = Fight.tokens or Fight.burst
+	have = math.min(Fight.burst, have + (now - (Fight.tokenAt or now)) / Fight.refill)
+	Fight.tokenAt = now
+	if have < 1 then
+		Fight.tokens = have
+		return false
+	end
+	Fight.tokens = have - 1
+	return true
+end
+
 function Fight.swing(target)
 	local tool, event = Fight.stick()
 	if not (tool and event and target) then return false end
+	-- The floor, and it lives here rather than in each caller because there
+	-- are five callers and they each had their own number. A swing refused
+	-- for pace returns false, which is what every caller already checks.
+	if Fight.noBreak then
+		local now = os.clock()
+		if now - (Fight.swungAt or 0) < Fight.safeGap then
+			Fight.paced = (Fight.paced or 0) + 1
+			return false
+		end
+		if not Fight.token() then
+			Fight.paced = (Fight.paced or 0) + 1
+			return false
+		end
+		Fight.swungAt = now
+	end
 	task.spawn(function()
 		pcall(function() event:FireServer("S") end)
 		task.wait()
@@ -2918,144 +3074,85 @@ end
 -- Depth and working-at-all are genuinely in tension: anything past the
 -- jiggle has to be reached unanchored, and unanchored you simply fall.
 
--- Hide, taken verbatim from the Rayfield build the user tested and confirmed.
+-- Hide, and this is the user's code with nothing of mine inside the
+-- manoeuvre. Everything I added on top of it broke it in turn, so the list of
+-- what was removed is the useful part of this comment:
 --
--- One line in it is the whole difference from the version I ported before, and
--- I had swapped it without noticing:
+--   * CFrame.new(hrp.Position) instead of hrp.CFrame - discarded the ROTATION,
+--     so every one of the twenty writes also snapped the character upright
+--   * a 300 stud descent AFTER anchoring - an anchored assembly is not
+--     simulated, so none of it replicated
+--   * a 260 stud fall onto a pillar - my idea, not theirs, and not needed
+--   * SetStateEnabled(Freefall, false) and ChangeState(Running) on every
+--     write, meant to suppress fall damage. This is the one that broke it
+--     most recently and most stupidly: the jiggle phases you through the
+--     floor by FALLING through it, and I disabled falling.
 --
---     theirs   hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
---     mine     hrp.CFrame = CFrame.new(hrp.Position) + Vector3.new(0, 5, 0)
+-- Two things are not theirs and both earn it:
 --
--- CFrame.new(position) throws the ROTATION away and rebuilds the frame facing
--- world forward. So every one of the twenty jiggle writes was also snapping
--- the character upright and re-oriented, twenty re-orientations in twenty
--- frames, which is exactly the kind of thing a server rejects and pulls back.
--- Adding a Vector3 to the existing CFrame moves it and leaves the rotation
--- alone. That is the fix.
+--   task.spawn, because this yields for twenty frames and Obsidian builds its
+--   tabs synchronously - a yielding callback during the config load stalls
+--   the whole menu, which Rayfield does not do.
 --
--- The rest is theirs too: fifteen studs down, anchor, pillar 505 below so its
--- top sits at your feet. No fall, no glide, no depth of mine. It is their
--- build that works and this is now their build.
+--   `if on == Ex.hidden then return end`, because SaveManager fires EVERY
+--   saved toggle's callback on load including the false ones, and the OFF
+--   branch is not a no-op - it jiggles and throws you fifteen studs up. That
+--   fired on every single execute.
+--
+-- Nothing else. No busy guard, no velocity handling, no state juggling, no
+-- delayed parking of the pillar.
 function Ex.hideSlab()
 	if Ex.hidePart and Ex.hidePart.Parent then return Ex.hidePart end
 	Ex.hidePart = make("Part", {
-		Name = "RKHide", Anchored = true, CanCollide = true,
+		Name = "HideColumn", Anchored = true,
 		Size = Vector3.new(20, 1000, 20), Position = Vector3.new(0, 10000, 0),
 	}, Workspace)
-	-- made once and left parented, like theirs; only the Adornee is toggled
 	Ex.hideGlow = make("Highlight", {
-		Name = "RKHideGlow", FillTransparency = 0.8, OutlineTransparency = 0.8,
-		FillColor = Color3.fromRGB(255, 255, 255),
-		OutlineColor = Color3.fromRGB(170, 0, 0),
+		Name = "HideHL",
+		FillColor = Color3.new(1, 1, 1), OutlineColor = Color3.new(170 / 255, 0, 0),
+		FillTransparency = 0.8, OutlineTransparency = 0.8,
 	}, Ex.hidePart)
 	return Ex.hidePart
 end
 
 function Ex.setHide(on)
-	-- The config loader fires every saved toggle on load, the false ones
-	-- included, and the OFF branch is not a no-op: it jiggles and then throws
-	-- you fifteen studs into the air.
 	if on == Ex.hidden then return end
-	if Ex.hideBusy then
-		notify("still moving - give it a second", 3)
-		-- the checkbox flipped before this callback ran, so put it back to
-		-- the real state or the guard above eats the next click
-		local tg = Toggles.RK_Hide
-		if tg and tg.Value ~= Ex.hidden then
-			tg.Value = Ex.hidden
-			pcall(function() tg:Display() end)
-		end
-		return
-	end
 	Ex.hidden = on
-	Ex.hideBusy = true
 	Ex.hideSlab()
-
 	task.spawn(function()
-		local hrp = getHRP()
-		if not hrp then Ex.hideBusy = false return end
-
-		-- No fall happened here. Say so every single write, because one
-		-- frame of Freefall is all a fall tracker needs.
-		local hum = getHum()
-		local function settle()
-			local p = getHRP()
-			if p then pcall(function() p.AssemblyLinearVelocity = Vector3.zero end) end
-			local h = getHum()
-			if h then
-				pcall(function()
-					h:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
-					h:ChangeState(Enum.HumanoidStateType.Running)
-				end)
-			end
-		end
-		if hum then
-			pcall(function()
-				hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
-			end)
-		end
-
-		hrp.Anchored = false
-		for _ = 1, 10 do
-			local live = getHRP()
-			if not live then break end
-			live.CFrame = live.CFrame + Vector3.new(0, 5, 0)
-			settle()
-			task.wait()
-			live = getHRP()
-			if not live then break end
-			live.CFrame = live.CFrame + Vector3.new(0, -5, 0)
-			settle()
-		end
-
-		local live = getHRP()
-		if live then
+		pcall(function()
+			local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+			local hrp = char:WaitForChild("HumanoidRootPart")
 			if on then
-				live.CFrame = live.CFrame + Vector3.new(0, -15, 0)
-				settle()
-				task.wait()
-				settle()
-				local down = getHRP()
-				if down then
-					down.Anchored = true
-					Ex.hidePart.Position = down.Position + Vector3.new(0, -505, 0)
-					if Ex.hideGlow then Ex.hideGlow.Adornee = Ex.hidePart end
+				hrp.Anchored = false
+				for _ = 1, 10 do
+					hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
+					task.wait()
+					hrp.CFrame = hrp.CFrame + Vector3.new(0, -5, 0)
 				end
-			else
-				live.CFrame = live.CFrame + Vector3.new(0, 15, 0)
-				settle()
+				hrp.CFrame = hrp.CFrame + Vector3.new(0, -15, 0)
 				task.wait()
-				settle()
-				local up = getHRP()
-				if up then up.Anchored = false end
-				if Ex.hideGlow then Ex.hideGlow.Adornee = nil end
-				-- park the pillar a beat later, once you are demonstrably up
-				task.delay(1, function()
-					if Ex.hidePart and not Ex.hidden then
-						Ex.hidePart.Position = Vector3.new(0, 10000, 0)
-					end
-				end)
-			end
-		end
-		-- hand Freefall back, or nothing can ever fall again
-		task.delay(0.5, function()
-			local h = getHum()
-			if h and not Ex.hidden then
-				pcall(function()
-					h:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
-				end)
+				hrp.Anchored = true
+				Ex.hidePart.Position = hrp.Position + Vector3.new(0, -505, 0)
+				Ex.hideGlow.Adornee = Ex.hidePart
+			else
+				hrp.Anchored = false
+				for _ = 1, 10 do
+					hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
+					task.wait()
+					hrp.CFrame = hrp.CFrame + Vector3.new(0, -5, 0)
+				end
+				hrp.CFrame = hrp.CFrame + Vector3.new(0, 15, 0)
+				task.wait()
+				hrp.Anchored = false
+				Ex.hideGlow.Adornee = nil
 			end
 		end)
-		Ex.hideBusy = false
 	end)
 end
 
 
 addCleanup("hide", function()
-	local h = getHum()
-	if h then
-		pcall(function() h:SetStateEnabled(Enum.HumanoidStateType.Freefall, true) end)
-	end
 	if Ex.hideGlow then pcall(function() Ex.hideGlow:Destroy() end) Ex.hideGlow = nil end
 	if Ex.hidePart then pcall(function() Ex.hidePart:Destroy() end) Ex.hidePart = nil end
 	local hrp = getHRP()
@@ -4456,10 +4553,12 @@ local SKY_PRESETS = { "Original", "Bright Day", "Full Moon", "Overcast", "Pitch 
 
 local SKY_LOOKS = {
 	["Bright Day"] = {
+		-- (199, 214, 226) is a hair off neutral, which is why this read grey.
+		-- A bright day is BLUE, and the sky is the brightest thing in it.
 		ClockTime = 14, Brightness = 3, FogEnd = 100000,
-		FogColor = Color3.fromRGB(199, 214, 226),
-		Ambient = Color3.fromRGB(178, 178, 178),
-		OutdoorAmbient = Color3.fromRGB(190, 190, 190),
+		FogColor = Color3.fromRGB(150, 194, 240),
+		Ambient = Color3.fromRGB(140, 164, 200),
+		OutdoorAmbient = Color3.fromRGB(168, 200, 244),
 	},
 	["Full Moon"] = {
 		ClockTime = 0, Brightness = 2, FogEnd = 6000,
@@ -4931,8 +5030,8 @@ Sky.GRADE = {
 	-- the four presets with clouds run a low haze on purpose: haze paints
 	-- the sky dome, and the dome is where the cloud deck is
 	["Bright Day"] = { density = 0.28, offset = 0.1, haze = 0.5, glare = 0.35,
-		colour = Color3.fromRGB(214, 228, 244), decay = Color3.fromRGB(150, 170, 200),
-		tint = Color3.fromRGB(255, 252, 244), brightness = 0.05, contrast = 0.08, sat = 0.08 },
+		colour = Color3.fromRGB(168, 206, 248), decay = Color3.fromRGB(120, 156, 210),
+		tint = Color3.fromRGB(240, 248, 255), brightness = 0.05, contrast = 0.08, sat = 0.16 },
 	["Full Moon"] = { density = 0.42, offset = 0, haze = 2.2, glare = 0,
 		colour = Color3.fromRGB(120, 136, 176), decay = Color3.fromRGB(40, 50, 78),
 		tint = Color3.fromRGB(214, 226, 255), brightness = 0, contrast = 0.12, sat = -0.15 },
@@ -4957,12 +5056,66 @@ Sky.GRADE = {
 	["Deep Sea"] = { density = 0.55, offset = 0, haze = 3.6, glare = 0,
 		colour = Color3.fromRGB(30, 78, 122), decay = Color3.fromRGB(6, 20, 38),
 		tint = Color3.fromRGB(214, 238, 255), brightness = 0, contrast = 0.1, sat = -0.1 },
-	Sunset = { density = 0.32, offset = 0.12, haze = 0.8, glare = 0.8,
+	Sunset = { density = 0.34, offset = 0.2, haze = 0.9, glare = 1,
 		colour = Color3.fromRGB(238, 152, 92), decay = Color3.fromRGB(96, 44, 30),
 		tint = Color3.fromRGB(255, 236, 214), brightness = 0.04, contrast = 0.12, sat = 0.28 },
 }
 
+-- Per preset: is the sun shown, and how big. Sizes are degrees of arc -
+-- Roblox's default sun is 21, so 40 is a low fat sunset sun and 14 is a small
+-- hard midday one.
+Sky.SKYBOX = {
+	["Bright Day"] = { shown = true, sun = 16, moon = 11 },
+	Sunset         = { shown = true, sun = 42, moon = 11 },
+	["Full Moon"]  = { shown = true, sun = 21, moon = 40 },
+	["Blood Moon"] = { shown = true, sun = 21, moon = 46 },
+	Overcast       = { shown = false, sun = 21, moon = 11 },
+	["Pitch Black"] = { shown = false, sun = 21, moon = 11 },
+	["Deep Sea"]   = { shown = false, sun = 21, moon = 11 },
+	Vaporwave      = { shown = true, sun = 34, moon = 30 },
+	Toxic          = { shown = true, sun = 26, moon = 11 },
+	["Night Club"] = { shown = false, sun = 21, moon = 11 },
+}
+
+function Sky.skyBox()
+	return Lighting:FindFirstChildOfClass("Sky")
+end
+
+function Sky.paintSky(name)
+	local box = Sky.skyBox()
+	if not box then return end
+	local spec = Sky.SKYBOX[name]
+	if not spec then
+		-- back to whatever the game had
+		if Sky.skySaved then
+			pcall(function()
+				box.CelestialBodiesShown = Sky.skySaved.shown
+				box.SunAngularSize = Sky.skySaved.sun
+				box.MoonAngularSize = Sky.skySaved.moon
+			end)
+			Sky.skySaved = nil
+		end
+		return
+	end
+	if not Sky.skySaved then
+		pcall(function()
+			Sky.skySaved = {
+				shown = box.CelestialBodiesShown,
+				sun = box.SunAngularSize,
+				moon = box.MoonAngularSize,
+			}
+		end)
+	end
+	pcall(function()
+		box.CelestialBodiesShown = spec.shown
+		box.SunAngularSize = spec.sun
+		box.MoonAngularSize = spec.moon
+	end)
+end
+addCleanup("skybox", function() Sky.paintSky(nil) end)
+
 function Sky.clearGrade()
+	Sky.paintSky(nil)
 	if Sky.atmos then pcall(function() Sky.atmos:Destroy() end) Sky.atmos = nil end
 	if Sky.cc then pcall(function() Sky.cc:Destroy() end) Sky.cc = nil end
 	if Sky.hidden then
@@ -5035,6 +5188,7 @@ function Sky.set(name)
 	Sky.on = true
 	if not Sky.fullbright then Sky.write(look) end
 	Sky.weather(name)
+	Sky.paintSky(name)
 	Sky.startLoop()
 	-- after Sky.weather, so the atmosphere it installs is in the tree by
 	-- the time the report reads it. Composing this any earlier is how the
@@ -5137,6 +5291,48 @@ function Face.set(on)
 		pcall(function() hrp.CFrame = CFrame.lookAt(hrp.Position, flat) end)
 	end)
 	addCleanup("face", function() Face.set(false) end)
+end
+
+local Moon = { on = false, autoWas = nil, autoHum = nil, conn = nil }
+
+function Moon.set(on)
+	Moon.on = on
+	if not on then
+		if Moon.conn then Moon.conn:Disconnect() Moon.conn = nil end
+		local hum = getHum()
+		if hum and Moon.autoWas ~= nil then
+			pcall(function() hum.AutoRotate = Moon.autoWas end)
+		end
+		Moon.autoWas = nil
+		return
+	end
+	if Moon.conn then return end
+	Moon.conn = RunService.RenderStepped:Connect(function()
+		if not Moon.on then return end
+		-- Spinbot and Always Face Rake own the same rotation. Whichever of
+		-- them is on wins; three writers of one CFrame is a fight nobody
+		-- wins and it looks like a seizure.
+		if Spin.on or Face.on then return end
+		local hum, hrp = getHum(), getHRP()
+		if not (hum and hrp) or hrp.Anchored then return end
+		-- AutoRotate is captured off the live humanoid each time it is found,
+		-- because a respawn brings a new one with the game's own value
+		if Moon.autoHum ~= hum then
+			Moon.autoHum = hum
+			Moon.autoWas = hum.AutoRotate
+		end
+		if hum.AutoRotate then pcall(function() hum.AutoRotate = false end) end
+		local dir = hum.MoveDirection
+		local flat = Vector3.new(dir.X, 0, dir.Z)
+		if flat.Magnitude < 0.05 then return end
+		-- face the opposite of travel: the legs still stride forward, so the
+		-- character walks backwards
+		local behind = hrp.Position - flat.Unit * 10
+		pcall(function()
+			hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(behind.X, hrp.Position.Y, behind.Z))
+		end)
+	end)
+	addCleanup("moonwalk", function() Moon.set(false) end)
 end
 
 
@@ -5440,6 +5636,11 @@ function Farm.pickScrap(me, info, radius)
 			-- Scrap5 at 27 points beats a Scrap1 at 12 from twenty studs
 			-- further out, and nothing beats being close
 			local score = -(s.pos - me).Magnitude + s.pts * 1.5
+			-- and the one already being walked to gets sixty studs of credit,
+			-- because switching costs the whole distance already covered. A
+			-- picker with no hysteresis walks to the midpoint of two options
+			-- and stays there.
+			if Farm.target and Farm.target.model == s.model then score = score + 60 end
 			if score > bestScore then best, bestScore = s, score end
 		end
 	end
@@ -5648,6 +5849,18 @@ function Farm.deadEndPenalty(me, goal)
 end
 
 function Farm.fleeGoal(me, rakePos)
+	-- where he WILL be. Running from where something is, is how you run into
+	-- it - and his velocity is readable, so there is no reason to guess.
+	local r = rake()
+	local rh = r and r:FindFirstChild("HumanoidRootPart")
+	if rh and rh:IsA("BasePart") then
+		local v = rh.AssemblyLinearVelocity
+		local flat = Vector3.new(v.X, 0, v.Z)
+		if flat.Magnitude > 1 then
+			if flat.Magnitude > 30 then flat = flat.Unit * 30 end
+			rakePos = rakePos + flat * 0.7
+		end
+	end
 	local house = LOCATIONS[1] and LOCATIONS[1].pos
 	local hereDist = (me - rakePos).Magnitude
 	local best, bestScore = nil, -math.huge
@@ -8940,6 +9153,18 @@ local function buildCombat(page)
 		Text = "Silent Aim", Default = false,
 		Callback = Fight.setSilent,
 	}):AddKeyPicker("RK_SilentKey", { Mode = "Toggle", SyncToggleState = true, Text = "Silent Aim" })
+	gb:AddSlider("RK_SilentFov", {
+		-- pixels from the centre of the screen. 360 is the whole viewport.
+		Text = "Silent Aim FOV", Default = 200, Min = 0, Max = 360, Rounding = 0,
+		Callback = function(v) Fight.silentFov = v end,
+	})
+	gb:AddToggle("RK_SilentRing", {
+		Text = "Show Silent Aim FOV", Default = false,
+		Callback = function(v)
+			Fight.silentRing = v
+			Esp.refreshRunning()
+		end,
+	})
 	gb:AddToggle("RK_AutoEquip", { Text = "Auto Equip Stun Stick", Default = false,
 		Callback = Fight.setAutoEquip })
 	gb:AddToggle("RK_NoCooldown", {
@@ -9167,11 +9392,13 @@ tryBuild("Exploits", buildExploits, Tabs.Exploits)
 
 local Skin = {
 	style = "Default", on = nil,
-	saved = nil, parts = nil, eyes = nil, mouth = nil,
+	saved = nil, parts = nil, eyes = nil, mouth = nil, hair = nil, blush = nil,
+	body = nil, skirt = nil,
 	conn = nil, paintedOn = nil, last = 0,
 }
 
 Skin.STYLES = { "Default", "Anime" }
+Skin.SKIN_COLOUR = Color3.fromRGB(252, 232, 224)
 
 function Skin.rakeParts(r)
 	local out = {}
@@ -9185,7 +9412,8 @@ function Skin.clear()
 	if Skin.parts then
 		for _, p in ipairs(Skin.parts) do pcall(function() p:Destroy() end) end
 	end
-	Skin.parts = nil
+	Skin.parts, Skin.eyes, Skin.hair, Skin.blush, Skin.mouth = nil, nil, nil, nil, nil
+	Skin.body, Skin.skirt = nil, nil
 	if Skin.saved then
 		for part, was in pairs(Skin.saved) do
 			if part and part.Parent then
@@ -9205,42 +9433,136 @@ addCleanup("rakeskin", function() Skin.clear() end)
 -- One cartoon eye: a flattened sphere for the white and a smaller darker one
 -- in front of it, welded nowhere and simply held on the head each frame -
 -- the head is server owned, so a weld of ours would be argued with.
-function Skin.eye(head, side, size)
-	local white = make("Part", {
-		Name = "RKEye", Anchored = true, CanCollide = false, CanQuery = false,
-		CanTouch = false, CastShadow = false, Material = Enum.Material.SmoothPlastic,
-		Color = Color3.fromRGB(255, 255, 255),
-		Size = Vector3.new(size * 0.62, size * 0.9, size * 0.28),
+-- One blob of hair. Everything on this skin is a flattened sphere, because a
+-- sphere mesh takes the part's Size and so can be any shape you like without
+-- an asset behind it.
+function Skin.blob(name, colour, sizeV, material, shape)
+	local p = make("Part", {
+		Name = name, Anchored = true, CanCollide = false, CanQuery = false,
+		CanTouch = false, CastShadow = false,
+		Material = material or Enum.Material.SmoothPlastic,
+		Color = colour, Size = sizeV,
 	}, Workspace)
-	make("SpecialMesh", { MeshType = Enum.MeshType.Sphere }, white)
-	local iris = make("Part", {
-		Name = "RKIris", Anchored = true, CanCollide = false, CanQuery = false,
-		CanTouch = false, CastShadow = false, Material = Enum.Material.Neon,
-		Color = Color3.fromRGB(90, 150, 255),
-		Size = Vector3.new(size * 0.34, size * 0.5, size * 0.2),
-	}, Workspace)
-	make("SpecialMesh", { MeshType = Enum.MeshType.Sphere }, iris)
-	return { white = white, iris = iris, side = side }
+	if shape == "box" then
+		-- a plain part, with the corners taken off by a slight bevel of scale
+		make("SpecialMesh", {
+			MeshType = Enum.MeshType.Brick, Scale = Vector3.new(1, 1, 1),
+		}, p)
+	elseif shape == "limb" then
+		-- a cylinder is a limb; a sphere stretched to a limb's proportions
+		-- bulges in the middle and pinches at the joints
+		make("CylinderMesh", {}, p)
+	else
+		make("SpecialMesh", { MeshType = Enum.MeshType.Sphere }, p)
+	end
+	return p
 end
+
+-- An eye: white, a big iris, and a highlight dot. The highlight is the part
+-- that actually sells it - a flat coloured disc reads as a doll, and a disc
+-- with a specular dot reads as drawn.
+function Skin.eye(side, size)
+	local white = Skin.blob("RKEye", Color3.fromRGB(255, 255, 255),
+		Vector3.new(size * 0.66, size * 1.02, size * 0.3))
+	local iris = Skin.blob("RKIris", Color3.fromRGB(126, 92, 214),
+		Vector3.new(size * 0.44, size * 0.72, size * 0.22), Enum.Material.Neon)
+	local shine = Skin.blob("RKShine", Color3.fromRGB(255, 255, 255),
+		Vector3.new(size * 0.15, size * 0.19, size * 0.12), Enum.Material.Neon)
+	local lash = Skin.blob("RKLash", Color3.fromRGB(28, 20, 34),
+		Vector3.new(size * 0.72, size * 0.2, size * 0.32))
+	return { white = white, iris = iris, shine = shine, lash = lash, side = side }
+end
+
+-- The parts that make him a monster rather than a person. Hidden, not
+-- destroyed: they are server owned and destroying them locally is a fight
+-- with replication for no gain.
+-- The limbs worth mirroring, and the shape each one takes. Anything not
+-- listed is simply hidden - the invisible R6 rig parts, the colliders and the
+-- hitboxes were never drawn in the first place.
+Skin.HAIR = Color3.fromRGB(46, 34, 60)
+Skin.DRESS = Color3.fromRGB(58, 62, 96)
+-- shape: "ball" is a Sphere mesh, "limb" is a Cylinder mesh, "box" is a plain
+-- rounded part. w/h/d scale the real limb's own size, so it still fits his
+-- rig - it is the RATIO between them that turns a lanky monster into a
+-- character.
+Skin.BODY = {
+	-- oversized head, which is most of what makes a shape read as anime
+	Head   = { w = 1.5,  h = 1.4,  d = 1.45, shape = "ball" },
+	Neck   = { w = 0.3,  h = 0.42, d = 0.3,  shape = "limb" },
+	-- short narrow torso: his is long, and length is what reads as monster
+	TorsoM = { w = 0.62, h = 0.66, d = 0.5,  shape = "box"  },
+	LArmM  = { w = 0.26, h = 0.72, d = 0.26, shape = "limb" },
+	RArmM  = { w = 0.26, h = 0.72, d = 0.26, shape = "limb" },
+	LLegM  = { w = 0.34, h = 0.78, d = 0.34, shape = "limb" },
+	RLegM  = { w = 0.34, h = 0.78, d = 0.34, shape = "limb" },
+}
 
 function Skin.build(r)
 	local head = r:FindFirstChild("Head")
 	if not head or not head:IsA("BasePart") then return end
 	local size = math.max(head.Size.Y, 1.4)
 	Skin.parts = {}
-	Skin.eyes = { Skin.eye(head, -1, size), Skin.eye(head, 1, size) }
-	for _, e in ipairs(Skin.eyes) do
-		Skin.parts[#Skin.parts + 1] = e.white
-		Skin.parts[#Skin.parts + 1] = e.iris
+
+	local function keep(p) Skin.parts[#Skin.parts + 1] = p return p end
+
+	-- The body: one blob per real limb, sized off that limb so it fits
+	-- whatever proportions he actually has rather than numbers I guessed.
+	Skin.body = {}
+	for _, d in ipairs(r:GetDescendants()) do
+		local spec = d:IsA("BasePart") and Skin.BODY[d.Name]
+		if spec then
+			local sz = d.Size
+			-- limbs and the skirt are clothed; the head, neck and arms are skin
+			local clothed = (d.Name == "TorsoM")
+			Skin.body[#Skin.body + 1] = {
+				real = d,
+				mirror = keep(Skin.blob("RKBody",
+					clothed and Skin.DRESS or Skin.SKIN_COLOUR,
+					Vector3.new(sz.X * spec.w, sz.Y * spec.h, sz.Z * spec.d),
+					nil, spec.shape)),
+			}
+			if d.Name == "TorsoM" then
+				-- a skirt, because a silhouette is what reads at distance and
+				-- this is the single cheapest thing that says "not a monster"
+				Skin.skirt = {
+					real = d,
+					mirror = keep(Skin.blob("RKSkirt", Skin.DRESS,
+						Vector3.new(sz.X * 0.95, sz.Y * 0.4, sz.Z * 0.8),
+						nil, "limb")),
+				}
+			end
+		end
 	end
-	local mouth = make("Part", {
-		Name = "RKMouth", Anchored = true, CanCollide = false, CanQuery = false,
-		CanTouch = false, CastShadow = false, Material = Enum.Material.SmoothPlastic,
-		Color = Color3.fromRGB(40, 20, 25),
-		Size = Vector3.new(size * 0.34, size * 0.12, size * 0.16),
-	}, Workspace)
-	Skin.mouth = mouth
-	Skin.parts[#Skin.parts + 1] = mouth
+
+	Skin.eyes = { Skin.eye(-1, size), Skin.eye(1, size) }
+	for _, e in ipairs(Skin.eyes) do
+		keep(e.lash) keep(e.white) keep(e.iris) keep(e.shine)
+	end
+
+	Skin.mouth = keep(Skin.blob("RKMouth", Color3.fromRGB(196, 96, 116),
+		Vector3.new(size * 0.2, size * 0.12, size * 0.14)))
+	Skin.blush = {
+		keep(Skin.blob("RKBlush", Color3.fromRGB(255, 168, 178),
+			Vector3.new(size * 0.34, size * 0.2, size * 0.12))),
+		keep(Skin.blob("RKBlush", Color3.fromRGB(255, 168, 178),
+			Vector3.new(size * 0.34, size * 0.2, size * 0.12))),
+	}
+
+	-- Hair: a cap over the crown, a fringe across the brow, two side strands
+	-- down past the jaw and a mass down the back. Four shapes is enough - the
+	-- silhouette is what reads at any distance, not the strands.
+	Skin.hair = {
+		cap   = keep(Skin.blob("RKHair", Skin.HAIR,
+			Vector3.new(size * 1.28, size * 1.18, size * 1.28))),
+		fringe= keep(Skin.blob("RKHair", Skin.HAIR,
+			Vector3.new(size * 1.24, size * 0.44, size * 0.5))),
+		left  = keep(Skin.blob("RKHair", Skin.HAIR,
+			Vector3.new(size * 0.34, size * 1.9, size * 0.42))),
+		right = keep(Skin.blob("RKHair", Skin.HAIR,
+			Vector3.new(size * 0.34, size * 1.9, size * 0.42))),
+		back  = keep(Skin.blob("RKHair", Skin.HAIR,
+			Vector3.new(size * 1.15, size * 2.6, size * 0.62))),
+	}
 end
 
 function Skin.hold()
@@ -9250,13 +9572,43 @@ function Skin.hold()
 	if not (head and head.Parent) then return end
 	local size = math.max(head.Size.Y, 1.4)
 	local cf = head.CFrame
-	for _, e in ipairs(Skin.eyes or {}) do
-		local at = cf * CFrame.new(e.side * size * 0.3, size * 0.12, -size * 0.5)
+	local face = -size * 0.52     -- the front of the head, in its own space
+
+	-- the mirrored body first: everything else hangs off the head
+	for _, b in ipairs(Skin.body or {}) do
+		if b.real.Parent then
+			b.mirror.CFrame = b.real.CFrame
+		else
+			b.mirror.Transparency = 1
+		end
+	end
+	if Skin.skirt and Skin.skirt.real.Parent then
+		-- hung at the bottom of the torso, in the torso's own frame so it
+		-- leans and turns with him
+		Skin.skirt.mirror.CFrame =
+			Skin.skirt.real.CFrame * CFrame.new(0, -Skin.skirt.real.Size.Y * 0.42, 0)
+	end
+
+	for i, e in ipairs(Skin.eyes or {}) do
+		local at = cf * CFrame.new(e.side * size * 0.29, size * 0.1, face)
 		e.white.CFrame = at
-		e.iris.CFrame = at * CFrame.new(0, 0, -size * 0.06)
+		e.iris.CFrame = at * CFrame.new(0, -size * 0.04, -size * 0.06)
+		e.shine.CFrame = at * CFrame.new(e.side * -size * 0.09, size * 0.16, -size * 0.11)
+		e.lash.CFrame = at * CFrame.new(0, size * 0.46, -size * 0.02)
+		local b = Skin.blush and Skin.blush[i]
+		if b then b.CFrame = cf * CFrame.new(e.side * size * 0.4, -size * 0.24, face * 0.94) end
 	end
 	if Skin.mouth then
-		Skin.mouth.CFrame = cf * CFrame.new(0, -size * 0.34, -size * 0.5)
+		Skin.mouth.CFrame = cf * CFrame.new(0, -size * 0.36, face)
+	end
+
+	local h = Skin.hair
+	if h then
+		h.cap.CFrame    = cf * CFrame.new(0, size * 0.18, size * 0.04)
+		h.fringe.CFrame = cf * CFrame.new(0, size * 0.46, face * 0.86)
+		h.left.CFrame   = cf * CFrame.new(-size * 0.6, -size * 0.42, -size * 0.06)
+		h.right.CFrame  = cf * CFrame.new(size * 0.6, -size * 0.42, -size * 0.06)
+		h.back.CFrame   = cf * CFrame.new(0, -size * 0.85, size * 0.42)
 	end
 end
 
@@ -9277,14 +9629,19 @@ function Skin.apply()
 			}
 			-- pale and smooth, and the mesh textures off, because his own
 			-- skin texture over a flat colour still reads as him
-			p.Color = Color3.fromRGB(252, 232, 224)
+			p.Color = Skin.SKIN_COLOUR
 			p.Material = Enum.Material.SmoothPlastic
 			if p:IsA("MeshPart") then p.TextureID = "" end
+			-- and then all of him goes. Recolouring left the silhouette, and
+			-- the silhouette is the thing you recognise: hide the lot and let
+			-- the mirrored body be what is seen.
+			p.Transparency = 1
 		end)
 		if not ok then Skin.saved[p] = nil end
 	end
 	Skin.build(r)
 	Skin.on = Skin.style
+	Skin.paintedOn = r
 	Skin.hold()
 	return true, "anime skin on - built from parts, so nothing to fail to load"
 end
@@ -9305,6 +9662,20 @@ function Skin.set(style)
 					Skin.paintedOn = r
 					Skin.on = nil
 					Skin.apply()
+				elseif Skin.saved then
+					-- held, not set once: the game repaints him itself -
+					-- Blood Hour turns him red - and a skin that loses to
+					-- that is a skin that works until it matters
+					for part, was in pairs(Skin.saved) do
+						if part and part.Parent then
+							pcall(function()
+								-- transparency, not colour: the real parts are
+								-- hidden now and the game putting one back
+								-- visible is the thing that would show
+								if part.Transparency ~= 1 then part.Transparency = 1 end
+							end)
+						end
+					end
 				end
 			end
 			Skin.hold()
@@ -9395,6 +9766,8 @@ local function buildMisc(page)
 		Text = "Unlock Camera Zoom", Default = false,
 		Callback = Comfort.setZoom,
 	})
+	gb2:AddToggle("RK_Moonwalk", { Text = "Moonwalk", Default = false,
+		Callback = Moon.set })
 	gb2:AddToggle("RK_NoBob", { Text = "No View Bobbing", Default = false,
 		Callback = Comfort.setNoBob })
 	gb2:AddToggle("RK_NoJumpscare", {
@@ -9714,18 +10087,16 @@ end)
 bind(LocalPlayer.CharacterAdded, function(char)
 	task.wait(0.6)
 	pcall(function()
-		-- the new character is neither anchored nor under the map, so the
-		-- hide state died with the old one. Un-check the box WITHOUT
-		-- SetValue: that calls the callback, which would fling the fresh
-		-- character fifteen studs up.
+		-- The new character is neither anchored nor under the map, so the
+		-- hide state died with the old one. Clear the flag and un-check the
+		-- box WITHOUT SetValue - that calls the callback, which would run the
+		-- un-hide manoeuvre on a character standing in the open.
+		--
+		-- It used to also nil the Highlight's Parent here, which detached it
+		-- from the pillar for good and left every later hide unlit.
 		if Ex.hidden then
-			Ex.hidden, Ex.hideBusy = false, false
-			if Ex.hideGlow then Ex.hideGlow.Adornee = nil Ex.hideGlow.Parent = nil end
-			-- the OFF branch is what normally parks the pillar and dying
-			-- skips it, so park it here or a 1000 stud slab is left behind
-			if Ex.hidePart and Ex.hidePart.Parent then
-				pcall(function() Ex.hidePart.Position = Vector3.new(0, 10000, 0) end)
-			end
+			Ex.hidden = false
+			if Ex.hideGlow then Ex.hideGlow.Adornee = nil end
 			local tg = Toggles.RK_Hide
 			if tg then
 				tg.Value = false
@@ -9760,7 +10131,7 @@ Library:OnUnload(function()
 	Fight.silent, Wep.on = false, false
 	Ex.instaCrate, Ex.killRake, Ex.hidden, Ex.float = false, false, false, false
 	Kill.on = false
-	Aura.on, Jump.on, Face.on = false, false, false
+	Aura.on, Jump.on, Face.on, Moon.on = false, false, false, false
 	Ex.antiTrap, Move.noclip, Move.noFall = false, false, false
 	Move.fly, Move.infJump, Move.antiFling, Move.holdHealth = false, false, false, false
 	Ex.bypassShock, Move.antiRagdoll = false, false
