@@ -1453,8 +1453,8 @@ local Esp = {
 	chams = {},
 	-- `label` is the no-Drawing half of the text pool; hideRest walks both
 	-- from the same used.text count, so only one of them is ever populated
-	pool = { text = {}, line = {}, tri = {}, label = {} },
-	used = { text = 0, line = 0, tri = 0, label = 0 },
+	pool = { text = {}, line = {}, tri = {}, label = {}, lineF = {} },
+	used = { text = 0, line = 0, tri = 0, label = 0, lineF = 0 },
 	gui = nil,
 	drawn = 0, running = false,
 }
@@ -1500,6 +1500,29 @@ addCleanup("esptext", function()
 	if Esp.gui then pcall(function() Esp.gui:Destroy() end) Esp.gui = nil end
 	Esp.pool.label = {}
 end)
+
+-- A circle from a Frame: a square with a UICorner at half its width is a
+-- circle, and every client has both.
+function Esp.ring(name)
+	local gui = Esp.board()
+	if not gui then return nil end
+	local f = make("Frame", {
+		Name = name, BackgroundTransparency = 1, BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+	}, gui)
+	make("UICorner", { CornerRadius = UDim.new(1, 0) }, f)
+	make("UIStroke", { Thickness = 1, Color = Color3.fromRGB(255, 255, 255) }, f)
+	return f
+end
+
+function Esp.ringAt(f, centre, radius, colour)
+	if not (f and centre) then return end
+	f.Position = UDim2.fromOffset(centre.X, centre.Y)
+	f.Size = UDim2.fromOffset(radius * 2, radius * 2)
+	local stroke = f:FindFirstChildOfClass("UIStroke")
+	if stroke then stroke.Color = colour end
+	f.Visible = true
+end
 
 function Esp.text(str, pos, color)
 	local n = Esp.used.text + 1
@@ -1553,32 +1576,80 @@ end
 function Esp.line(from, to, color)
 	local n = Esp.used.line + 1
 	Esp.used.line = n
-	local d = Esp.pool.line[n]
-	if not d then
-		d = newDraw("Line", { Thickness = 1 })
-		if not d then return end
-		Esp.pool.line[n] = d
+
+	if HAS_DRAWING and not Esp.drawLineDead then
+		local d = Esp.pool.line[n]
+		if not d then
+			d = newDraw("Line", { Thickness = 1 })
+			if d then
+				Esp.pool.line[n] = d
+			elseif n == 1 then
+				Esp.drawLineDead = true
+			end
+		end
+		if d then
+			d.From, d.To, d.Color = from, to, color
+			d.Visible = true
+			return
+		end
 	end
-	d.From, d.To, d.Color = from, to, color
-	d.Visible = true
+
+	-- a rectangle rotated onto the line between the two points
+	local gui = Esp.board()
+	if not gui then return end
+	local f = Esp.pool.lineF[n]
+	if not f then
+		f = make("Frame", {
+			Name = "RKLine", BorderSizePixel = 0,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+		}, gui)
+		Esp.pool.lineF[n] = f
+	end
+	local d2 = to - from
+	local len = d2.Magnitude
+	if len < 1 then f.Visible = false return end
+	local mid = (from + to) / 2
+	f.Position = UDim2.fromOffset(mid.X, mid.Y)
+	f.Size = UDim2.fromOffset(len, 2)
+	f.Rotation = math.deg(math.atan2(d2.Y, d2.X))
+	f.BackgroundColor3 = color
+	f.Visible = true
 end
 
 function Esp.triangle(a, b, c, color)
 	local n = Esp.used.tri + 1
 	Esp.used.tri = n
-	local d = Esp.pool.tri[n]
-	if not d then
-		d = newDraw("Triangle", { Filled = true })
-		if not d then return end
-		Esp.pool.tri[n] = d
+
+	if HAS_DRAWING and not Esp.drawTriDead then
+		local d = Esp.pool.tri[n]
+		if not d then
+			d = newDraw("Triangle", { Filled = true })
+			if d then
+				Esp.pool.tri[n] = d
+			elseif n == 1 then
+				Esp.drawTriDead = true
+			end
+		end
+		if d then
+			d.PointA, d.PointB, d.PointC, d.Color = a, b, c, color
+			d.Visible = true
+			return
+		end
 	end
-	d.PointA, d.PointB, d.PointC, d.Color = a, b, c, color
-	d.Visible = true
+
+	-- no filled polygon without Drawing, so the arrow is drawn as its three
+	-- edges. An outline reads as an arrow perfectly well and costs three
+	-- frames instead of a renderer.
+	Esp.line(a, b, color)
+	Esp.line(b, c, color)
+	Esp.line(c, a, color)
 end
 
 function Esp.hideRest()
-	-- the label pool is filled from used.text, not from a count of its own
+	-- these two are filled from the counts of the pools they stand in for,
+	-- not from counts of their own
 	Esp.used.label = Esp.used.text
+	Esp.used.lineF = Esp.used.line
 	for kind, list in pairs(Esp.pool) do
 		for i = Esp.used[kind] + 1, #list do
 			local d = list[i]
@@ -1719,6 +1790,15 @@ function Esp.step()
 				Thickness = 1, NumSides = 48, Filled = false,
 				Color = Color3.fromRGB(120, 200, 255), Transparency = 0.75,
 			})
+			if not Esp.silentCircle then
+				Esp.silentRingF = Esp.ring("RKSilentRing")
+			end
+		end
+		if Esp.silentRingF then
+			Esp.ringAt(Esp.silentRingF, centre, Fight.silentFov or 360,
+				(Fight.silent and Fight.silentOff
+					and Fight.silentOff <= (Fight.silentFov or 360))
+					and Color3.fromRGB(140, 255, 170) or Color3.fromRGB(120, 200, 255))
 		end
 		if Esp.silentCircle then
 			Esp.silentCircle.Position = centre
@@ -1732,11 +1812,18 @@ function Esp.step()
 			Esp.silentCircle.Transparency = live and 1 or 0.6
 			Esp.silentCircle.Visible = true
 		end
-	elseif Esp.silentCircle then
-		Esp.silentCircle.Visible = false
+	else
+		if Esp.silentCircle then Esp.silentCircle.Visible = false end
+		if Esp.silentRingF then Esp.silentRingF.Visible = false end
 	end
 
 	if Esp.fovCircle then
+		if not Esp.circle and not Esp.circleF then
+			Esp.circleF = Esp.ring("RKFovRing")
+		end
+		if Esp.circleF then
+			Esp.ringAt(Esp.circleF, centre, Esp.fovSize, Color3.fromRGB(255, 255, 255))
+		end
 		if not Esp.circle then
 			Esp.circle = newDraw("Circle", {
 				Thickness = 1, NumSides = 100, Filled = false,
@@ -3074,33 +3161,27 @@ end
 -- Depth and working-at-all are genuinely in tension: anything past the
 -- jiggle has to be reached unanchored, and unanchored you simply fall.
 
--- Hide, and this is the user's code with nothing of mine inside the
--- manoeuvre. Everything I added on top of it broke it in turn, so the list of
--- what was removed is the useful part of this comment:
+-- Hide, and the second-screen test is what finally explained it.
 --
---   * CFrame.new(hrp.Position) instead of hrp.CFrame - discarded the ROTATION,
---     so every one of the twenty writes also snapped the character upright
---   * a 300 stud descent AFTER anchoring - an anchored assembly is not
---     simulated, so none of it replicated
---   * a 260 stud fall onto a pillar - my idea, not theirs, and not needed
---   * SetStateEnabled(Freefall, false) and ChangeState(Running) on every
---     write, meant to suppress fall damage. This is the one that broke it
---     most recently and most stupidly: the jiggle phases you through the
---     floor by FALLING through it, and I disabled falling.
+-- The manoeuvre I was given moves you down unanchored, waits one frame, and
+-- ANCHORS. An anchored assembly stops accepting corrections from the server -
+-- so when the server rejects a position inside the map and sends you back to
+-- the surface, your client never applies it. You see yourself underground.
+-- Every other client, and the Rake, sees you standing in the open. Which is
+-- exactly what "on my screen im underground but on my second screen im not"
+-- means, and exactly why it never stopped him hurting you: his AI runs on the
+-- server and was never in any doubt where you were.
 --
--- Two things are not theirs and both earn it:
+-- Anchoring did not make the hide work. It made the FAILURE invisible.
 --
---   task.spawn, because this yields for twenty frames and Obsidian builds its
---   tabs synchronously - a yielding callback during the config load stalls
---   the whole menu, which Rayfield does not do.
---
---   `if on == Ex.hidden then return end`, because SaveManager fires EVERY
---   saved toggle's callback on load including the false ones, and the OFF
---   branch is not a no-op - it jiggles and throws you fifteen studs up. That
---   fired on every single execute.
---
--- Nothing else. No busy guard, no velocity handling, no state juggling, no
--- delayed parking of the pillar.
+-- So this holds the position unanchored instead - rewritten every frame,
+-- which is the only state in which your client streams position at all, with
+-- collision off so nothing pushes you out. If the server accepts it you are
+-- genuinely hidden and the second screen will agree. If it rejects it you
+-- will SEE yourself snap back, which is a true answer rather than a
+-- comfortable one.
+Ex.hideDepth = 15
+
 function Ex.hideSlab()
 	if Ex.hidePart and Ex.hidePart.Parent then return Ex.hidePart end
 	Ex.hidePart = make("Part", {
@@ -3115,44 +3196,98 @@ function Ex.hideSlab()
 	return Ex.hidePart
 end
 
+function Ex.hideCollide(on)
+	local char = LocalPlayer.Character
+	if not char then return end
+	for _, d in ipairs(char:GetDescendants()) do
+		if d:IsA("BasePart") then
+			if on then
+				if Ex.hideColl and Ex.hideColl[d] ~= nil then
+					pcall(function() d.CanCollide = Ex.hideColl[d] end)
+				end
+			else
+				Ex.hideColl = Ex.hideColl or {}
+				if Ex.hideColl[d] == nil then Ex.hideColl[d] = d.CanCollide end
+				pcall(function() d.CanCollide = false end)
+			end
+		end
+	end
+	if on then Ex.hideColl = nil end
+end
+
 function Ex.setHide(on)
 	if on == Ex.hidden then return end
 	Ex.hidden = on
 	Ex.hideSlab()
+
+	if not on then
+		if Ex.holdConn then Ex.holdConn:Disconnect() Ex.holdConn = nil end
+		Ex.hideCollide(true)
+		Ex.hideGlow.Adornee = nil
+		local up = Ex.hideAt
+		Ex.hideAt = nil
+		task.spawn(function()
+			pcall(function()
+				local hrp = getHRP()
+				if hrp then
+					hrp.Anchored = false
+					if up then hrp.CFrame = up end
+				end
+			end)
+		end)
+		return
+	end
+
 	task.spawn(function()
 		pcall(function()
 			local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 			local hrp = char:WaitForChild("HumanoidRootPart")
-			if on then
-				hrp.Anchored = false
-				for _ = 1, 10 do
-					hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
-					task.wait()
-					hrp.CFrame = hrp.CFrame + Vector3.new(0, -5, 0)
-				end
-				hrp.CFrame = hrp.CFrame + Vector3.new(0, -15, 0)
+			-- where to put you back, remembered before anything moves
+			Ex.hideAt = hrp.CFrame
+			hrp.Anchored = false
+			Ex.hideCollide(false)
+
+			-- the jiggle is still theirs: it is what phases you through the
+			-- floor, and it works because each write is unanchored
+			for _ = 1, 10 do
+				hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
 				task.wait()
-				hrp.Anchored = true
-				Ex.hidePart.Position = hrp.Position + Vector3.new(0, -505, 0)
-				Ex.hideGlow.Adornee = Ex.hidePart
-			else
-				hrp.Anchored = false
-				for _ = 1, 10 do
-					hrp.CFrame = hrp.CFrame + Vector3.new(0, 5, 0)
-					task.wait()
-					hrp.CFrame = hrp.CFrame + Vector3.new(0, -5, 0)
-				end
-				hrp.CFrame = hrp.CFrame + Vector3.new(0, 15, 0)
-				task.wait()
-				hrp.Anchored = false
-				Ex.hideGlow.Adornee = nil
+				hrp.CFrame = hrp.CFrame + Vector3.new(0, -5, 0)
 			end
+			hrp.CFrame = hrp.CFrame + Vector3.new(0, -Ex.hideDepth, 0)
+			task.wait()
+
+			local down = getHRP()
+			if not down then return end
+			local hold = down.CFrame
+			Ex.hidePart.Position = down.Position + Vector3.new(0, -505, 0)
+			Ex.hideGlow.Adornee = Ex.hidePart
+
+			-- and HOLD it, unanchored. This is the whole change: an anchored
+			-- character stops hearing the server, which is comfortable and
+			-- useless. Unanchored, the position is streamed - so it either
+			-- takes, or you watch it fail.
+			if Ex.holdConn then Ex.holdConn:Disconnect() end
+			Ex.holdConn = RunService.Heartbeat:Connect(function()
+				if not Ex.hidden then return end
+				local live = getHRP()
+				if not live then return end
+				pcall(function()
+					live.Anchored = false
+					live.AssemblyLinearVelocity = Vector3.zero
+					live.CFrame = hold
+				end)
+			end)
+			addCleanup("hidehold", function()
+				if Ex.holdConn then Ex.holdConn:Disconnect() Ex.holdConn = nil end
+			end)
 		end)
 	end)
 end
 
-
 addCleanup("hide", function()
+	if Ex.holdConn then Ex.holdConn:Disconnect() Ex.holdConn = nil end
+	Ex.hideCollide(true)
 	if Ex.hideGlow then pcall(function() Ex.hideGlow:Destroy() end) Ex.hideGlow = nil end
 	if Ex.hidePart then pcall(function() Ex.hidePart:Destroy() end) Ex.hidePart = nil end
 	local hrp = getHRP()
@@ -9393,11 +9528,21 @@ tryBuild("Exploits", buildExploits, Tabs.Exploits)
 local Skin = {
 	style = "Default", on = nil,
 	saved = nil, parts = nil, eyes = nil, mouth = nil, hair = nil, blush = nil,
-	body = nil, skirt = nil,
+	body = nil, skirt = nil, whole = nil, wholeRoot = nil,
 	conn = nil, paintedOn = nil, last = 0,
 }
 
-Skin.STYLES = { "Default", "Anime" }
+Skin.STYLES = { "Default", "Anime1", "Anime2", "Anime3", "Built" }
+
+-- Verified as Models, public and unmoderated, via the Roblox economy API.
+-- Their CONTENTS are unverified: asset download needs a login now.
+Skin.PRESETS = {
+	Anime1 = "4661297252",   -- "Anime Girl"
+	Anime2 = "6859666802",   -- "Cute anime girl"
+	Anime3 = "2513353543",   -- "Anime Girl"
+}
+-- "Built" is the parts-and-spheres one, kept as the fallback for when a model
+-- will not load rather than as a thing anybody would pick on purpose.
 Skin.SKIN_COLOUR = Color3.fromRGB(252, 232, 224)
 
 function Skin.rakeParts(r)
@@ -9413,7 +9558,7 @@ function Skin.clear()
 		for _, p in ipairs(Skin.parts) do pcall(function() p:Destroy() end) end
 	end
 	Skin.parts, Skin.eyes, Skin.hair, Skin.blush, Skin.mouth = nil, nil, nil, nil, nil
-	Skin.body, Skin.skirt = nil, nil
+	Skin.body, Skin.skirt, Skin.whole, Skin.wholeRoot = nil, nil, nil, nil
 	if Skin.saved then
 		for part, was in pairs(Skin.saved) do
 			if part and part.Parent then
@@ -9567,7 +9712,7 @@ end
 
 function Skin.hold()
 	local r = rake()
-	if not (Skin.on == "Anime" and r and Skin.parts) then return end
+	if not (Skin.on and Skin.on ~= "Default" and r and Skin.parts) then return end
 	local head = r:FindFirstChild("Head")
 	if not (head and head.Parent) then return end
 	local size = math.max(head.Size.Y, 1.4)
@@ -9582,6 +9727,17 @@ function Skin.hold()
 			b.mirror.Transparency = 1
 		end
 	end
+	-- the whole-model version: everything rides the root, keeping the layout
+	-- it had inside its own model
+	if Skin.whole and Skin.wholeRoot and Skin.wholeRoot.Parent then
+		local base = Skin.wholeRoot.CFrame
+		for _, w in ipairs(Skin.whole) do
+			if w.part.Parent then
+				w.part.CFrame = base * CFrame.new(w.offset) * w.rot
+			end
+		end
+	end
+
 	if Skin.skirt and Skin.skirt.real.Parent then
 		-- hung at the bottom of the torso, in the torso's own frame so it
 		-- leans and turns with him
@@ -9639,11 +9795,182 @@ function Skin.apply()
 		end)
 		if not ok then Skin.saved[p] = nil end
 	end
+	Skin.parts = Skin.parts or {}
+	Skin.body = Skin.body or {}
+
+	-- a model you typed wins over a preset, and either wins over the built one
+	local id = tostring(Skin.modelId or ""):gsub("%D", "")
+	if id == "" then id = Skin.PRESETS[Skin.style] or "" end
+	if id ~= "" then
+		local model = Skin.fetch(id)
+		if model then
+			local made = Skin.buildFromModel(r, model)
+			if made > 0 then
+				Skin.on = Skin.style
+				Skin.paintedOn = r
+				Skin.hold()
+				return true, "wearing model " .. id .. " - " .. made .. " limbs, animated"
+			end
+			-- no rig inside it. Wear the whole thing instead: scaled to his
+			-- height and carried on his root. It will not animate, but a
+			-- correct character standing still beats a wrong one moving.
+			made = Skin.wearWhole(r, model)
+			if made > 0 then
+				Skin.on = Skin.style
+				Skin.paintedOn = r
+				Skin.hold()
+				return true, "wearing model " .. id .. " whole - " .. made
+					.. " parts, no rig inside it so it will not animate"
+			end
+			notify("model " .. id .. " has no parts at all - using the built skin", 8)
+		else
+			-- still fetching, or it failed. The built one shows meanwhile.
+			Skin.build(r)
+			Skin.on = Skin.style
+			Skin.paintedOn = r
+			Skin.hold()
+			return true, "fetching model " .. id .. "..."
+		end
+	end
+
 	Skin.build(r)
 	Skin.on = Skin.style
 	Skin.paintedOn = r
 	Skin.hold()
-	return true, "anime skin on - built from parts, so nothing to fail to load"
+	return true, "built skin on - paste a model id for a real character"
+end
+
+Skin.modelId = ""
+
+-- Fetch once and keep. GetObjects yields and can fail outright on a private
+-- or moderated asset, so it runs in its own thread and reports rather than
+-- throwing.
+function Skin.fetch(id)
+	if Skin.fetched and Skin.fetchedId == id then return Skin.fetched end
+	if Skin.fetching then return nil end
+	Skin.fetching = true
+	task.spawn(function()
+		local ok, objs = pcall(function()
+			return game:GetObjects("rbxassetid://" .. id)
+		end)
+		if ok and type(objs) == "table" and objs[1] then
+			Skin.fetched, Skin.fetchedId = objs[1], id
+			notify("model " .. id .. " loaded - applying", 5)
+			Skin.on = nil
+			Skin.apply()
+		else
+			Skin.fetched, Skin.fetchedId = nil, nil
+			notify("model " .. id .. " would not load - it may be private, "
+				.. "moderated, or not a model", 8)
+		end
+		Skin.fetching = false
+	end)
+	return nil
+end
+
+-- Their parts onto his bones. Matched by name first, because a Roblox
+-- character rig uses the same limb names his does; anything unmatched is
+-- dropped rather than guessed at, since a mystery part welded to a random
+-- bone is what makes these look wrong.
+Skin.RIG_MAP = {
+	Head = "Head", Torso = "TorsoM", UpperTorso = "TorsoM",
+	["Left Arm"] = "LArmM", LeftUpperArm = "LArmM", LeftHand = "LArmM",
+	["Right Arm"] = "RArmM", RightUpperArm = "RArmM", RightHand = "RArmM",
+	["Left Leg"] = "LLegM", LeftUpperLeg = "LLegM", LeftFoot = "LLegM",
+	["Right Leg"] = "RLegM", RightUpperLeg = "RLegM", RightFoot = "RLegM",
+}
+
+function Skin.buildFromModel(r, model)
+	local made = 0
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local boneName = Skin.RIG_MAP[d.Name]
+			local bone = boneName and r:FindFirstChild(boneName, true)
+			if bone and bone:IsA("BasePart") then
+				local ok, clone = pcall(function() return d:Clone() end)
+				if ok and clone then
+					pcall(function()
+						clone.Anchored = true
+						clone.CanCollide = false
+						clone.CanQuery = false
+						clone.CanTouch = false
+						clone.Massless = true
+						clone.Parent = Workspace
+					end)
+					Skin.parts[#Skin.parts + 1] = clone
+					Skin.body[#Skin.body + 1] = {
+						real = bone, mirror = clone,
+						-- keep the offset it had inside its own model, so a
+						-- hand stays at the end of an arm
+						offset = CFrame.new(),
+					}
+					made = made + 1
+				end
+			end
+		end
+	end
+	return made
+end
+
+-- The whole model, scaled to him and carried on his root.
+--
+-- Sized off his own height so it fits whoever he is rather than a number I
+-- guessed, and every part keeps its offset within the model so the thing
+-- arrives assembled rather than as a heap at one point.
+function Skin.wearWhole(r, model)
+	local root = r:FindFirstChild("HumanoidRootPart")
+	if not root then return 0 end
+
+	local lo, hi
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local p = d.Position
+			if not lo then lo, hi = p, p end
+			lo = Vector3.new(math.min(lo.X, p.X), math.min(lo.Y, p.Y), math.min(lo.Z, p.Z))
+			hi = Vector3.new(math.max(hi.X, p.X), math.max(hi.Y, p.Y), math.max(hi.Z, p.Z))
+		end
+	end
+	if not lo then return 0 end
+	local mid = (lo + hi) * 0.5
+	local tall = math.max(hi.Y - lo.Y, 0.1)
+
+	-- his height, measured off his own rig rather than assumed
+	local top, bottom = root.Position.Y, root.Position.Y
+	for _, d in ipairs(r:GetDescendants()) do
+		if d:IsA("BasePart") then
+			top = math.max(top, d.Position.Y + d.Size.Y * 0.5)
+			bottom = math.min(bottom, d.Position.Y - d.Size.Y * 0.5)
+		end
+	end
+	local scale = math.clamp((top - bottom) / tall, 0.05, 20)
+
+	local made = 0
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local ok, clone = pcall(function() return d:Clone() end)
+			if ok and clone then
+				pcall(function()
+					clone.Anchored = true
+					clone.CanCollide, clone.CanQuery, clone.CanTouch = false, false, false
+					clone.Massless = true
+					clone.Size = d.Size * scale
+					clone.Parent = Workspace
+				end)
+				Skin.parts[#Skin.parts + 1] = clone
+				Skin.whole = Skin.whole or {}
+				Skin.whole[#Skin.whole + 1] = {
+					part = clone,
+					-- where it sat inside its own model, scaled
+					offset = (d.Position - mid) * scale,
+					rot = d.CFrame - d.Position,
+				}
+				made = made + 1
+			end
+		end
+	end
+	Skin.wholeRoot = root
+	Skin.wholeLift = (top - bottom) * 0.5
+	return made
 end
 
 function Skin.set(style)
@@ -9704,6 +10031,19 @@ local function buildVisuals(page)
 		Text = "Skin", Values = Skin.STYLES, Default = "Default",
 		Callback = Skin.set,
 	})
+	gbS:AddInput("RK_RakeModel", {
+		Text = "Model ID", Default = "", Finished = true,
+		ClearTextOnFocus = false, Placeholder = "paste a Roblox model id",
+		Callback = function(v)
+			Skin.modelId = v
+			Skin.fetched, Skin.fetchedId = nil, nil
+			if Skin.style ~= "Default" then
+				Skin.on = nil
+				local _, why = Skin.apply()
+				if why then notify(why, 5) end
+			end
+		end,
+	})
 
 	local gbH = page:AddLeftGroupbox("HUD")
 	gbH:AddToggle("RK_Crosshair", { Text = "Crosshair", Default = false, Callback = Cross.set })
@@ -9749,6 +10089,116 @@ end
 -- changing the game's own settings table at the source rather than holding a
 -- property against the script that owns it.
 
+
+-- ======================== anticheat bypass spots ========================
+-- Tall red pillars over the places the game's position checking is soft.
+--
+-- WHAT IS CONFIRMED AND WHAT IS A GUESS, because that distinction matters
+-- more than the feature:
+--
+--   CONFIRMED - the user's own, found in the world by name:
+--     CavePart   (-139, 15,  9)   the two in front of the cave
+--     CavePart2  (-138, 18,  6)
+--     LadderPart ( 62, 56, -55)   the Observation Tower ladder
+--
+--   CANDIDATES - the same SHAPE of thing, found by class rather than told to
+--   me. Every TrussPart in the map is somewhere the engine lets you climb,
+--   and a climbable surface is where position checking usually goes soft:
+--     the tower truss   ( 60, 33, -54)  46 studs tall, under LadderPart
+--     five RK_CL_T      (-383..-379, 18, 71..79)  beside the Safe House
+--
+-- The candidates are drawn in a different colour and labelled as candidates.
+-- I have no way to test whether they work from here, and colouring a guess
+-- the same as a known answer is how a guess becomes folklore.
+--
+-- Nothing is hardcoded: the names and the class are searched for live, so a
+-- map update moves the markers rather than stranding them.
+
+local Bypass = { on = false, marks = {}, folder = nil }
+
+Bypass.NAMED = { "CavePart", "CavePart2", "LadderPart" }
+Bypass.CONFIRMED = Color3.fromRGB(255, 40, 40)
+Bypass.CANDIDATE = Color3.fromRGB(255, 170, 40)
+
+function Bypass.clear()
+	if Bypass.folder then pcall(function() Bypass.folder:Destroy() end) end
+	Bypass.folder, Bypass.marks = nil, {}
+end
+addCleanup("bypass", function() Bypass.clear() end)
+
+function Bypass.pillar(at, colour, label)
+	local p = make("Part", {
+		Name = "RKBypass", Anchored = true, CanCollide = false, CanQuery = false,
+		CanTouch = false, CastShadow = false, Material = Enum.Material.Neon,
+		Color = colour, Transparency = 0.45,
+		Size = Vector3.new(2, 400, 2),
+		CFrame = CFrame.new(at + Vector3.new(0, 200, 0)),
+	}, Bypass.folder)
+	-- a BillboardGui rather than Drawing, so it works on mobile too - the
+	-- ESP labels had to learn this the hard way
+	local gui = make("BillboardGui", {
+		Name = "RKBypassTag", AlwaysOnTop = true,
+		Size = UDim2.fromOffset(220, 34),
+		StudsOffsetWorldSpace = Vector3.new(0, -196, 0),
+	}, p)
+	make("TextLabel", {
+		BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
+		Font = Enum.Font.GothamBold, TextSize = 15, TextColor3 = colour,
+		TextStrokeTransparency = 0.4, Text = label,
+	}, gui)
+	Bypass.marks[#Bypass.marks + 1] = p
+	return p
+end
+
+function Bypass.find()
+	local found, seen = {}, {}
+	local map = Workspace:FindFirstChild("Map")
+	local roots = { map or Workspace, Workspace:FindFirstChild("Filter") }
+
+	local function add(part, colour, label)
+		if not (part and part:IsA("BasePart")) or seen[part] then return end
+		seen[part] = true
+		found[#found + 1] = { pos = part.Position, colour = colour, label = label }
+	end
+
+	for _, root in ipairs(roots) do
+		if root then
+			for _, d in ipairs(root:GetDescendants()) do
+				if d:IsA("BasePart") then
+					for _, name in ipairs(Bypass.NAMED) do
+						if d.Name == name then add(d, Bypass.CONFIRMED, name) end
+					end
+					-- a truss is a climbable surface, which is the shape the
+					-- known spots share. Reported as a candidate, not a fact.
+					if d:IsA("TrussPart") then
+						add(d, Bypass.CANDIDATE, "climbable (candidate)")
+					end
+				end
+			end
+		end
+	end
+	return found
+end
+
+function Bypass.set(on)
+	Bypass.on = on
+	Bypass.clear()
+	if not on then return end
+	Bypass.folder = make("Folder", { Name = "RKBypassSpots" }, Workspace)
+	local spots = Bypass.find()
+	local confirmed = 0
+	for _, sp in ipairs(spots) do
+		Bypass.pillar(sp.pos, sp.colour, sp.label)
+		if sp.colour == Bypass.CONFIRMED then confirmed = confirmed + 1 end
+	end
+	if #spots == 0 then
+		notify("found none - the map may not be loaded yet", 5)
+	else
+		notify(string.format("%d spots: %d known, %d candidates (orange)",
+			#spots, confirmed, #spots - confirmed), 7)
+	end
+end
+
 local function buildMisc(page)
 	local gb = page:AddLeftGroupbox("Interaction")
 	gb:AddToggle("RK_ForcePc", {
@@ -9760,6 +10210,10 @@ local function buildMisc(page)
 		Callback = function(v) Misc.set("blockPopups", v) end,
 	})
 	gb:AddButton({ Text = "Skip The Intro", Func = Misc.skipIntro })
+	gb:AddToggle("RK_Bypass", {
+		Text = "Show Anticheat Bypass Spots", Default = false,
+		Callback = Bypass.set,
+	})
 
 	local gb2 = page:AddLeftGroupbox("Camera")
 	gb2:AddToggle("RK_Zoom", {
@@ -10096,6 +10550,8 @@ bind(LocalPlayer.CharacterAdded, function(char)
 		-- from the pillar for good and left every later hide unlit.
 		if Ex.hidden then
 			Ex.hidden = false
+			if Ex.holdConn then Ex.holdConn:Disconnect() Ex.holdConn = nil end
+			Ex.hideColl = nil
 			if Ex.hideGlow then Ex.hideGlow.Adornee = nil end
 			local tg = Toggles.RK_Hide
 			if tg then
