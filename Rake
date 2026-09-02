@@ -1,5 +1,5 @@
 --developed by NeverWin
---stop tryna leak my stuff
+--stop tryna leak my stuff xeenlyz
 --if you want a key dm me on dsc @codkw (there will be no "classic add keysytem" i will just send the key)
 local function _yhvvjnc(s)return function()s=s*16807%2147483647 return s end end
 local function _txuptgp(sd)local c={}
