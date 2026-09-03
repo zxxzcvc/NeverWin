@@ -1,4 +1,7 @@
 --developed by NeverWin
+--this script has been generated using ai dont expect much
+--stop leaking my stuff xeenlyz
+--if you want a key dm me on dsc @codkw
 local function _giljqpl(s)return function()s=s*16807%2147483647 return s end end
 local function _vcbpkwq(sd)local c={}
 for i=0,25 do c[#c+1]=string.char(65+i)end
